@@ -2,60 +2,58 @@
 
 set -eo pipefail
 
-# clone dependency proto files
-COSMOS_URL=github.com/cosmos/cosmos-sdk
-IBC_URL=github.com/cosmos/ibc-go
-IBC_V=v8
-INITIA_URL=github.com/initia-labs/initia
-OPINIT_URL=github.com/initia-labs/OPinit
-INDEXER_URL=github.com/initia-labs/kvindexer
-SLINKY_URL=github.com/skip-mev/slinky
+# Function to extract version from go.mod
+extract_version() {
+  grep "$1 v" ./go.mod | sed -n -e "s/^.* //p"
+}
 
-COSMOS_SDK_VERSION=$(cat ./go.mod | grep "$COSMOS_URL v" | sed -n -e "s/^.* //p")
-IBC_VERSION=$(cat ./go.mod | grep "$IBC_URL/$IBC_V v" | sed -n -e "s/^.* //p")
-INITIA_VERSION=$(cat ./go.mod | grep "$INITIA_URL v" | sed -n -e "s/^.* //p")
-OPINIT_VERSION=$(cat ./go.mod | grep "$OPINIT_URL v" | sed -n -e "s/^.* //p")
-INDEXER_VERSION=$(cat ./go.mod | grep "$INDEXER_URL v" | sed -n -e "s/^.* //p")
-SLINKY_VERSION=$(cat ./go.mod | grep "$SLINKY_URL v" | sed -n -e "s/^.* //p")
+# URLs and corresponding paths
+declare -A REPOS
+REPOS=(
+  ["github.com/cosmos/cosmos-sdk"]="COSMOS_SDK_VERSION"
+  ["github.com/cosmos/ibc-go"]="IBC_VERSION"
+  ["github.com/initia-labs/initia"]="INITIA_VERSION"
+  ["github.com/initia-labs/OPinit"]="OPINIT_VERSION"
+  ["github.com/initia-labs/kvindexer"]="INDEXER_VERSION"
+  ["github.com/skip-mev/slinky"]="SLINKY_VERSION"
+)
 
+# Clone repositories and extract versions
 mkdir -p ./third_party
 cd third_party
-git clone -b $INITIA_VERSION https://$INITIA_URL
-git clone -b $OPINIT_VERSION https://$OPINIT_URL
-git clone -b $COSMOS_SDK_VERSION https://$COSMOS_URL
-git clone -b $IBC_VERSION https://$IBC_URL
-git clone -b $INDEXER_VERSION https://$INDEXER_URL
-git clone -b $SLINKY_VERSION https://$SLINKY_URL
+
+for URL in "${!REPOS[@]}"; do
+  VERSION_VAR="${REPOS[$URL]}"
+  VERSION=$(extract_version "$URL")
+
+  if [[ -z "$VERSION" ]]; then
+    echo "Error: Version not found for $URL"
+    exit 1
+  fi
+
+  eval $VERSION_VAR=$VERSION
+  git clone -b ${!VERSION_VAR} https://$URL || { echo "Failed to clone $URL"; exit 1; }
+done
+
 cd ..
 
-
-# start generating
+# Start generating Swagger files
 mkdir -p ./tmp-swagger-gen
 cd proto
-proto_dirs=$(find \
-  ../third_party/cosmos-sdk/proto/cosmos \
-  ../third_party/ibc-go/proto/ibc \
-  ../third_party/initia/proto \
-  ../third_party/opinit/proto \
-  ../third_party/kvindexer/proto \
-  ../third_party/slinky/proto \
-  -path -prune -o -name '*.proto' -print0 | xargs -0 -n1 dirname | sort | uniq)
+
+proto_dirs=$(find ../third_party/*/proto -name '*.proto' -print0 | xargs -0 -n1 dirname | sort | uniq)
 for dir in $proto_dirs; do
-  # generate swagger files (filter query files)
+  # Generate Swagger files (filter query and service files)
   query_file=$(find "${dir}" -maxdepth 1 \( -name 'query.proto' -o -name 'service.proto' \))
-  if [[ ! -z "$query_file" ]]; then
-    buf generate --template buf.gen.swagger.yaml $query_file
+  if [[ -n "$query_file" ]]; then
+    buf generate --template buf.gen.swagger.yaml "$query_file"
   fi
 done
+
 cd ..
 
-# combine swagger files
-# uses nodejs package `swagger-combine`.
-# all the individual swagger files need to be configured in `config.json` for merging
+# Combine Swagger files
 swagger-combine ./client/docs/config.json -o ./client/docs/swagger-ui/swagger.yaml -f yaml --continueOnConflictingPaths true --includeDefinitions true
 
-# clean swagger files
-rm -rf ./tmp-swagger-gen
-
-# clean third party files
-rm -rf ./third_party
+# Clean up generated and third-party files
+rm -rf ./tmp-swagger-gen ./third_party
